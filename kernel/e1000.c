@@ -102,7 +102,35 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  if (!holding(&e1000_lock))
+    acquire(&e1000_lock);
+
+  int index = regs[E1000_TDT];
+
+  if ((tx_ring[index].status & E1000_TXD_STAT_DD) != E1000_TXD_STAT_DD) {
+    if (holding(&e1000_lock))
+      release(&e1000_lock);
+    return -1;
+  }
+
+  if (tx_mbufs[index]) {
+    mbuffree(tx_mbufs[index]);
+  }
+
+  tx_ring[index].addr = (uint64) m->head;
+  tx_ring[index].length = m->len;
+  tx_ring[index].cmd = 0;
+  tx_ring[index].cmd |= 1;
+  tx_ring[index].cmd |= 1 << 1;
+  tx_ring[index].cmd |= 1 << 2;
+  tx_ring[index].cmd |= 1 << 3;
+  tx_mbufs[index] = m; // free the mbuf next time visiting the index.
+
+  regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+
+  if (holding(&e1000_lock))
+    release(&e1000_lock);
+
   return 0;
 }
 
@@ -115,6 +143,66 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  if (!holding(&e1000_lock))
+    acquire(&e1000_lock);
+
+  // 
+  // Sending mbuf one at a time causes receive buffer exceeding.
+  //
+  // int index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+  // if ((rx_ring[index].status & E1000_RXD_STAT_DD) != E1000_RXD_STAT_DD) {
+  //   if (holding(&e1000_lock))
+  //     release(&e1000_lock);
+  //   return;
+  // }
+
+  // rx_mbufs[index]->len = rx_ring[index].length;
+  
+  // net_rx(rx_mbufs[index]);
+
+  // struct mbuf* m = mbufalloc(0); // allocate empty mbuf to the index.
+  // rx_ring[index].addr = (uint64) m->head;
+  // rx_ring[index].status = 0;
+  // rx_mbufs[index] = m;
+
+  // regs[E1000_RDT] = index;
+
+  struct mbuf *queue = mbufalloc(0); 
+  struct mbuf *cur = queue;
+
+  for (int i = 0; i < RX_RING_SIZE; i++) {
+    int index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    if ((rx_ring[index].status & E1000_RXD_STAT_DD) != E1000_RXD_STAT_DD) {
+      if (holding(&e1000_lock))
+        release(&e1000_lock);
+      break;
+    }
+
+    // net_rx(rx_mbufs[index]);
+    rx_mbufs[index]->len = rx_ring[index].length;
+    cur->next = rx_mbufs[index];
+    cur = cur->next;
+    
+    struct mbuf* m = mbufalloc(0);
+    rx_ring[index].addr = (uint64) m->head;
+    rx_ring[index].status = 0;
+    rx_mbufs[index] = m;
+
+    regs[E1000_RDT] = index;
+  }
+
+  cur = queue->next;
+  while (cur) {
+    struct mbuf *item = cur;
+    cur = cur->next;
+    net_rx(item);
+  }
+  mbuffree(queue);
+
+  if (holding(&e1000_lock))
+    release(&e1000_lock);
 }
 
 void
